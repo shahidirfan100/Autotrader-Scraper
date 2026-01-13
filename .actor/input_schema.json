@@ -1,0 +1,130 @@
+{
+  "title": "Autotrader Canada Scraper",
+  "description": "Extract vehicle listings from Autotrader.ca with home delivery options. Filter by make, model, year, price, mileage, and location across Canadian provinces.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "startUrl": {
+      "title": "Start URL",
+      "type": "string",
+      "description": "Direct Autotrader.ca search URL. Overrides other filters if provided.",
+      "editor": "textfield"
+    },
+    "make": {
+      "title": "Make",
+      "type": "string",
+      "description": "Vehicle manufacturer (e.g., Honda, Toyota, Ford).",
+      "editor": "textfield",
+      "prefill": "honda"
+    },
+    "model": {
+      "title": "Model",
+      "type": "string",
+      "description": "Vehicle model (e.g., Civic, Camry, F-150).",
+      "editor": "textfield",
+      "prefill": "civic"
+    },
+    "province": {
+      "title": "Province",
+      "type": "string",
+      "description": "Canadian province code (e.g., on, bc, ab, qc).",
+      "editor": "textfield",
+      "prefill": "on"
+    },
+    "city": {
+      "title": "City",
+      "type": "string",
+      "description": "City name (e.g., toronto, vancouver, calgary).",
+      "editor": "textfield"
+    },
+    "minYear": {
+      "title": "Minimum Year",
+      "type": "integer",
+      "description": "Earliest model year to include.",
+      "minimum": 1990,
+      "editor": "number"
+    },
+    "maxYear": {
+      "title": "Maximum Year",
+      "type": "integer",
+      "description": "Latest model year to include.",
+      "editor": "number"
+    },
+    "minPrice": {
+      "title": "Minimum Price (CAD)",
+      "type": "integer",
+      "description": "Minimum listing price in Canadian dollars.",
+      "minimum": 0,
+      "editor": "number"
+    },
+    "maxPrice": {
+      "title": "Maximum Price (CAD)",
+      "type": "integer",
+      "description": "Maximum listing price in Canadian dollars.",
+      "editor": "number"
+    },
+    "minMileage": {
+      "title": "Minimum Mileage (km)",
+      "type": "integer",
+      "description": "Minimum odometer reading in kilometers.",
+      "minimum": 0,
+      "editor": "number"
+    },
+    "maxMileage": {
+      "title": "Maximum Mileage (km)",
+      "type": "integer",
+      "description": "Maximum odometer reading in kilometers.",
+      "editor": "number"
+    },
+    "bodyType": {
+      "title": "Body Type",
+      "type": "string",
+      "description": "Vehicle body style (e.g., sedan, suv, truck, coupe).",
+      "editor": "textfield"
+    },
+    "fuelType": {
+      "title": "Fuel Type",
+      "type": "string",
+      "description": "Fuel type (e.g., gasoline, electric, hybrid, diesel).",
+      "editor": "textfield"
+    },
+    "transmission": {
+      "title": "Transmission",
+      "type": "string",
+      "description": "Transmission type (e.g., automatic, manual).",
+      "editor": "textfield"
+    },
+    "results_wanted": {
+      "title": "Maximum Results",
+      "type": "integer",
+      "description": "Maximum number of vehicle listings to collect.",
+      "minimum": 1,
+      "default": 50,
+      "prefill": 20,
+      "editor": "number"
+    },
+    "max_pages": {
+      "title": "Maximum Pages",
+      "type": "integer",
+      "description": "Maximum number of search result pages to process.",
+      "minimum": 1,
+      "default": 20,
+      "prefill": 5,
+      "editor": "number"
+    },
+    "proxyConfiguration": {
+      "title": "Proxy Configuration",
+      "type": "object",
+      "description": "Proxy settings for requests. Residential proxies recommended.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": [
+          "RESIDENTIAL"
+        ]
+      }
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}

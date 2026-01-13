@@ -1,0 +1,63 @@
+{
+  "actorSpecification": 1,
+  "fields": {},
+  "views": {
+    "overview": {
+      "title": "Vehicle Listings",
+      "transformation": {
+        "fields": [
+          "year",
+          "make",
+          "model",
+          "trim",
+          "price_formatted",
+          "mileage_formatted",
+          "city",
+          "province",
+          "url"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "year": {
+            "label": "Year",
+            "format": "number"
+          },
+          "make": {
+            "label": "Make",
+            "format": "text"
+          },
+          "model": {
+            "label": "Model",
+            "format": "text"
+          },
+          "trim": {
+            "label": "Trim",
+            "format": "text"
+          },
+          "price_formatted": {
+            "label": "Price",
+            "format": "text"
+          },
+          "mileage_formatted": {
+            "label": "Mileage",
+            "format": "text"
+          },
+          "city": {
+            "label": "City",
+            "format": "text"
+          },
+          "province": {
+            "label": "Province",
+            "format": "text"
+          },
+          "url": {
+            "label": "Listing URL",
+            "format": "link"
+          }
+        }
+      }
+    }
+  }
+}
