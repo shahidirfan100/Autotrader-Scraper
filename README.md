@@ -5,7 +5,7 @@ Extract vehicle listings with home delivery options from Autotrader.ca, Canada's
 ## Features
 
 - **Home Delivery Listings** — Focus on vehicles available for contactless purchase and home delivery across Canada
-- **Advanced Filtering** — Search by make, model, year range, price range, mileage, body type, fuel type, and transmission
+- **Advanced Filtering** — Search by make, model, year range, price range, mileage, and location
 - **Complete Vehicle Data** — Extract 25+ data points per listing including VIN, stock number, and full specifications
 - **Location Targeting** — Filter by Canadian province and city for localized results
 - **High-Resolution Images** — Capture all gallery images for each vehicle listing
@@ -30,9 +30,6 @@ Extract vehicle listings with home delivery options from Autotrader.ca, Canada's
 | `minYear` / `maxYear` | Integer | Model year range filter |
 | `minPrice` / `maxPrice` | Integer | Price range in CAD |
 | `minMileage` / `maxMileage` | Integer | Odometer range in kilometers |
-| `bodyType` | String | Body style (sedan, suv, truck, coupe) |
-| `fuelType` | String | Fuel type (gasoline, electric, hybrid, diesel) |
-| `transmission` | String | Transmission type (automatic, manual) |
 | `results_wanted` | Integer | Maximum listings to collect (default: 50) |
 | `max_pages` | Integer | Maximum pages to process (default: 20) |
 | `startUrl` | String | Direct search URL (overrides other filters) |
@@ -92,22 +89,20 @@ Each vehicle listing includes:
 }
 ```
 
-### Find Electric Vehicles Under $50,000
+### Find Vehicles Under $30,000
 
 ```json
 {
-  "fuelType": "electric",
-  "maxPrice": 50000,
+  "maxPrice": 30000,
   "minYear": 2020,
   "results_wanted": 100
 }
 ```
 
-### Search Trucks in Alberta
+### Search Cars in Alberta
 
 ```json
 {
-  "bodyType": "truck",
   "province": "ab",
   "city": "calgary",
   "results_wanted": 75
@@ -137,9 +132,6 @@ There is no hard limit. Adjust `results_wanted` and `max_pages` based on your ne
 
 **How often is the data updated?**
 Schedule runs hourly, daily, or weekly using Apify's scheduling feature to get fresh listings.
-
-**Can I filter by specific features?**
-Use filters like `bodyType`, `fuelType`, and `transmission`. For specific features, scrape broader results and filter the output data.
 
 **What provinces are supported?**
 All Canadian provinces and territories: ON, BC, AB, QC, MB, SK, NS, NB, NL, PE, NT, YT, NU.

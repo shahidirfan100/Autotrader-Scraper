@@ -1,7 +1,6 @@
 // Autotrader.ca Home Delivery Scraper - CheerioCrawler implementation
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
-import { load as cheerioLoad } from 'cheerio';
 
 await Actor.init();
 
@@ -19,9 +18,6 @@ async function main() {
             maxPrice,
             minMileage,
             maxMileage,
-            bodyType = '',
-            fuelType = '',
-            transmission = '',
             results_wanted: RESULTS_WANTED_RAW = 50,
             max_pages: MAX_PAGES_RAW = 20,
             startUrl,
@@ -39,20 +35,21 @@ async function main() {
         };
 
         const cleanText = (text) => {
-            if (!text) return '';
-            return String(text).replace(/\s+/g, ' ').trim();
+            if (!text) return null;
+            const cleaned = String(text).replace(/\s+/g, ' ').trim();
+            return cleaned || null;
         };
 
         const cleanPrice = (priceStr) => {
             if (!priceStr) return null;
-            const match = String(priceStr).replace(/[,$]/g, '').match(/\d+/);
-            return match ? parseInt(match[0], 10) : null;
+            const match = String(priceStr).replace(/[,$]/g, '').match(/[\d,]+/);
+            return match ? parseInt(match[0].replace(/,/g, ''), 10) : null;
         };
 
         const cleanMileage = (mileageStr) => {
             if (!mileageStr) return null;
-            const match = String(mileageStr).replace(/,/g, '').match(/\d+/);
-            return match ? parseInt(match[0], 10) : null;
+            const match = String(mileageStr).replace(/,/g, '').match(/[\d,]+/);
+            return match ? parseInt(match[0].replace(/,/g, ''), 10) : null;
         };
 
         const buildStartUrl = (pageOffset = 0) => {
@@ -85,11 +82,6 @@ async function main() {
             if (minMileage) u.searchParams.set('oRng', `${minMileage},${maxMileage || ''}`);
             else if (maxMileage) u.searchParams.set('oRng', `,${maxMileage}`);
 
-            // Other filters
-            if (bodyType) u.searchParams.set('body', bodyType);
-            if (fuelType) u.searchParams.set('fuel', fuelType);
-            if (transmission) u.searchParams.set('trans', transmission);
-
             return u.href;
         };
 
@@ -112,18 +104,25 @@ async function main() {
             const scripts = $('script');
             for (let i = 0; i < scripts.length; i++) {
                 const content = $(scripts[i]).html() || '';
-                const match = content.match(/window\['ngVdpModel'\]\s*=\s*({[\s\S]*?});/);
-                if (match) {
-                    try {
-                        const data = JSON.parse(match[1]);
-                        return data;
-                    } catch { /* continue */ }
+                // Try multiple patterns for the model data
+                const patterns = [
+                    /window\['ngVdpModel'\]\s*=\s*({[\s\S]*?});/,
+                    /window\.ngVdpModel\s*=\s*({[\s\S]*?});/,
+                    /__NEXT_DATA__.*?({[\s\S]*?})<\/script>/,
+                ];
+                for (const pattern of patterns) {
+                    const match = content.match(pattern);
+                    if (match) {
+                        try {
+                            return JSON.parse(match[1]);
+                        } catch { /* continue */ }
+                    }
                 }
             }
             return null;
         }
 
-        // Extract from JSON-LD schema
+        // Extract from JSON-LD schema  
         function extractFromJsonLd($) {
             const scripts = $('script[type="application/ld+json"]');
             for (let i = 0; i < scripts.length; i++) {
@@ -131,7 +130,7 @@ async function main() {
                     const parsed = JSON.parse($(scripts[i]).html() || '');
                     const items = Array.isArray(parsed) ? parsed : [parsed];
                     for (const item of items) {
-                        if (item && (item['@type'] === 'Vehicle' || item['@type'] === 'Car' || item['@type'] === 'Product')) {
+                        if (item && (item['@type'] === 'Vehicle' || item['@type'] === 'Car' || item['@type'] === 'Product' || item['@type'] === 'Offer')) {
                             return item;
                         }
                     }
@@ -140,103 +139,185 @@ async function main() {
             return null;
         }
 
-        // Parse vehicle data from ngVdpModel
+        // Parse vehicle data from ngVdpModel - improved mapping
         function parseVdpModel(data, url) {
             if (!data) return null;
 
-            const hero = data.hero || {};
-            const specs = data.specifications || {};
-            const seller = data.seller || {};
-            const pricing = data.pricing || {};
-            const media = data.media || {};
+            // Navigate through potential nested structures
+            const hero = data.hero || data.vehicle || data.listing || data || {};
+            const specs = data.specifications || data.specs || hero.specifications || hero.specs || {};
+            const seller = data.seller || data.dealer || hero.seller || hero.dealer || {};
+            const pricing = data.pricing || data.price || hero.pricing || hero.price || {};
+            const media = data.media || data.images || data.gallery || hero.media || {};
+            const vehicle = data.vehicle || hero.vehicle || hero || {};
+
+            // Extract ad ID from URL if not in data
+            const urlAdId = url.match(/\/a\/[^\/]+\/[^\/]+\/[^\/]+\/[^\/]+\/(\d+_[^\/]+)/)?.[1] ||
+                url.match(/\/(\d+_[^\/\?]+)/)?.[1];
 
             return {
-                ad_id: data.adId || hero.adId || null,
-                make: hero.make || specs.make || null,
-                model: hero.model || specs.model || null,
-                year: hero.year || specs.year || null,
-                trim: hero.trim || specs.trim || null,
-                price: pricing.price || hero.price || null,
-                price_formatted: pricing.displayPrice || hero.displayPrice || null,
-                mileage: specs.mileage || specs.odometer || null,
-                mileage_formatted: specs.displayMileage || null,
-                transmission: specs.transmission || null,
-                drivetrain: specs.drivetrain || specs.driveTrain || null,
-                body_type: specs.bodyType || specs.bodyStyle || null,
-                exterior_color: specs.exteriorColour || specs.exteriorColor || null,
-                interior_color: specs.interiorColour || specs.interiorColor || null,
-                fuel_type: specs.fuelType || null,
-                engine: specs.engine || null,
-                doors: specs.doors || specs.numberOfDoors || null,
-                seats: specs.seatingCapacity || specs.seats || null,
-                city: seller.city || null,
-                province: seller.province || seller.state || null,
-                seller_name: seller.name || seller.dealerName || null,
-                is_private_seller: seller.isPrivate || seller.privateSeller || false,
-                dealer_id: seller.dealerId || null,
-                description: data.description || hero.description || null,
-                images: (media.images || media.gallery || []).map(img =>
-                    typeof img === 'string' ? img.split('?')[0] : (img.url || img.src || '').split('?')[0]
-                ).filter(Boolean),
-                vehicle_status: hero.status || specs.status || 'Used',
-                vin: specs.vin || null,
-                stock_number: specs.stockNumber || null,
-                features: data.features || [],
+                ad_id: data.adId || hero.adId || vehicle.adId || urlAdId || null,
+                make: vehicle.make || hero.make || specs.make || null,
+                model: vehicle.model || hero.model || specs.model || null,
+                year: vehicle.year || hero.year || specs.year || null,
+                trim: vehicle.trim || hero.trim || specs.trim || null,
+                price: pricing.price || pricing.amount || hero.price || cleanPrice(pricing.displayPrice) || null,
+                price_formatted: pricing.displayPrice || pricing.formattedPrice || hero.displayPrice ||
+                    (pricing.price ? `$${pricing.price.toLocaleString()}` : null),
+                mileage: specs.mileage || specs.odometer || specs.kilometres || vehicle.mileage || null,
+                mileage_formatted: specs.displayMileage || specs.formattedMileage ||
+                    (specs.mileage ? `${specs.mileage.toLocaleString()} km` : null),
+                transmission: specs.transmission || vehicle.transmission || null,
+                drivetrain: specs.drivetrain || specs.driveTrain || specs.driveType || vehicle.drivetrain || null,
+                body_type: specs.bodyType || specs.bodyStyle || specs.body || vehicle.bodyType || null,
+                exterior_color: specs.exteriorColour || specs.exteriorColor || specs.colour || vehicle.exteriorColour || null,
+                interior_color: specs.interiorColour || specs.interiorColor || vehicle.interiorColour || null,
+                fuel_type: specs.fuelType || specs.fuel || vehicle.fuelType || null,
+                engine: specs.engine || specs.engineDescription || vehicle.engine || null,
+                doors: specs.doors || specs.numberOfDoors || vehicle.doors || null,
+                seats: specs.seatingCapacity || specs.seats || specs.passengers || vehicle.seats || null,
+                city: seller.city || seller.location?.city || vehicle.city || null,
+                province: seller.province || seller.state || seller.location?.province || vehicle.province || null,
+                seller_name: seller.name || seller.dealerName || seller.sellerName || null,
+                is_private_seller: seller.isPrivate || seller.privateSeller || seller.isPrivateSeller || false,
+                dealer_id: seller.dealerId || seller.id || null,
+                description: data.description || hero.description || vehicle.description || null,
+                images: extractImages(media),
+                vehicle_status: hero.status || specs.status || vehicle.status || 'Used',
+                vin: specs.vin || vehicle.vin || null,
+                stock_number: specs.stockNumber || specs.stock || vehicle.stockNumber || null,
+                features: data.features || hero.features || vehicle.features || [],
                 url: url,
             };
         }
 
-        // HTML fallback extraction
+        function extractImages(media) {
+            if (!media) return [];
+            const images = media.images || media.gallery || media.photos || [];
+            if (Array.isArray(images)) {
+                return images.map(img => {
+                    if (typeof img === 'string') return img.split('?')[0];
+                    return (img.url || img.src || img.href || '').split('?')[0];
+                }).filter(Boolean);
+            }
+            return [];
+        }
+
+        // HTML fallback extraction - improved with better selectors
         function extractFromHtml($, url) {
+            // Parse title for year/make/model
             const title = $('h1').first().text().trim();
             const titleMatch = title.match(/^(\d{4})\s+(\w+)\s+(.+)/);
 
-            const priceText = $('[class*="price"], .hero-price, [data-testid="price"]').first().text();
-            const mileageText = $('[class*="mileage"], [class*="odometer"], [data-testid="mileage"]').first().text();
+            // Price extraction with multiple selectors
+            const priceSelectors = [
+                '[data-testid="hero-price"]',
+                '.hero-price',
+                '[class*="price-amount"]',
+                '[class*="listing-price"]',
+                '.price-container',
+                '[class*="Price"]',
+                'span[class*="price"]',
+            ];
+            let priceText = null;
+            for (const sel of priceSelectors) {
+                const el = $(sel).first();
+                if (el.length) {
+                    priceText = el.text().trim();
+                    if (priceText && priceText.includes('$')) break;
+                }
+            }
 
+            // Mileage extraction
+            const mileageSelectors = [
+                '[data-testid="mileage"]',
+                '[class*="mileage"]',
+                '[class*="odometer"]',
+                '[class*="kilometres"]',
+            ];
+            let mileageText = null;
+            for (const sel of mileageSelectors) {
+                const el = $(sel).first();
+                if (el.length) {
+                    mileageText = el.text().trim();
+                    if (mileageText && /\d/.test(mileageText)) break;
+                }
+            }
+
+            // Image extraction
             const images = [];
-            $('img[src*="images.autotrader.ca"], [class*="gallery"] img').each((_, img) => {
+            $('img[src*="images.autotrader.ca"], [class*="gallery"] img, [class*="carousel"] img, [class*="photo"] img').each((_, img) => {
                 const src = $(img).attr('src') || $(img).attr('data-src');
-                if (src) images.push(src.split('?')[0]);
+                if (src && !src.includes('placeholder') && !src.includes('logo')) {
+                    images.push(src.split('?')[0]);
+                }
             });
 
-            const getSpecValue = (label) => {
-                const row = $(`dt:contains("${label}"), th:contains("${label}"), [class*="label"]:contains("${label}")`).first();
-                if (row.length) {
-                    return row.next().text().trim() || row.parent().find('dd, td, [class*="value"]').text().trim();
+            // Spec value extractor
+            const getSpecValue = (labels) => {
+                const labelList = Array.isArray(labels) ? labels : [labels];
+                for (const label of labelList) {
+                    // Try definition list
+                    let row = $(`dt:contains("${label}")`).first();
+                    if (row.length) {
+                        const val = row.next('dd').text().trim();
+                        if (val) return val;
+                    }
+                    // Try table
+                    row = $(`th:contains("${label}"), td:contains("${label}")`).first();
+                    if (row.length) {
+                        const val = row.next('td').text().trim() || row.parent().find('td').last().text().trim();
+                        if (val) return val;
+                    }
+                    // Try label/value pairs
+                    row = $(`[class*="label"]:contains("${label}"), [class*="spec-label"]:contains("${label}")`).first();
+                    if (row.length) {
+                        const val = row.next().text().trim() || row.parent().find('[class*="value"]').text().trim();
+                        if (val) return val;
+                    }
                 }
                 return null;
             };
 
+            // Location extraction
+            const locationText = $('[class*="location"], [data-testid="location"], [class*="dealer-location"]').first().text().trim();
+            const locationParts = locationText.split(',').map(s => s.trim());
+
+            // Seller extraction
+            const sellerName = $('[class*="dealer-name"], [class*="seller-name"], [data-testid="dealer-name"], [class*="dealership"]').first().text().trim();
+
+            // Extract ad ID from URL
+            const urlAdId = url.match(/\/(\d+_[^\/\?]+)/)?.[1] || url.match(/\/a\/[^\/]+\/[^\/]+\/[^\/]+\/[^\/]+\/([^\/\?]+)/)?.[1];
+
             return {
-                ad_id: url.match(/\/a\/([^\/\?]+)/)?.[1] || null,
+                ad_id: urlAdId || null,
                 make: titleMatch?.[2] || null,
                 model: titleMatch?.[3]?.split(' ')[0] || null,
                 year: titleMatch?.[1] ? parseInt(titleMatch[1], 10) : null,
-                trim: null,
+                trim: titleMatch?.[3]?.split(' ').slice(1).join(' ') || null,
                 price: cleanPrice(priceText),
-                price_formatted: priceText?.trim() || null,
+                price_formatted: priceText || null,
                 mileage: cleanMileage(mileageText),
-                mileage_formatted: mileageText?.trim() || null,
-                transmission: getSpecValue('Transmission'),
-                drivetrain: getSpecValue('Drivetrain') || getSpecValue('Drive Train'),
-                body_type: getSpecValue('Body Type') || getSpecValue('Body Style'),
-                exterior_color: getSpecValue('Exterior Colour') || getSpecValue('Exterior Color'),
-                interior_color: getSpecValue('Interior Colour') || getSpecValue('Interior Color'),
-                fuel_type: getSpecValue('Fuel Type'),
-                engine: getSpecValue('Engine'),
-                doors: getSpecValue('Doors') ? parseInt(getSpecValue('Doors'), 10) : null,
-                seats: getSpecValue('Seats') || getSpecValue('Seating Capacity'),
-                city: $('[class*="location"] [class*="city"], [data-testid="city"]').first().text().trim() || null,
-                province: $('[class*="location"] [class*="province"], [data-testid="province"]').first().text().trim() || null,
-                seller_name: $('[class*="dealer-name"], [class*="seller-name"], [data-testid="dealer-name"]').first().text().trim() || null,
-                is_private_seller: $('[class*="private"]').length > 0,
+                mileage_formatted: mileageText || null,
+                transmission: getSpecValue(['Transmission', 'Trans']),
+                drivetrain: getSpecValue(['Drivetrain', 'Drive Train', 'Drive Type']),
+                body_type: getSpecValue(['Body Type', 'Body Style', 'Body']),
+                exterior_color: getSpecValue(['Exterior Colour', 'Exterior Color', 'Colour', 'Color']),
+                interior_color: getSpecValue(['Interior Colour', 'Interior Color']),
+                fuel_type: getSpecValue(['Fuel Type', 'Fuel']),
+                engine: getSpecValue(['Engine', 'Engine Type']),
+                doors: (() => { const d = getSpecValue(['Doors', 'Number of Doors']); return d ? parseInt(d, 10) : null; })(),
+                seats: getSpecValue(['Seats', 'Seating Capacity', 'Passengers']),
+                city: locationParts[0] || null,
+                province: locationParts[1] || null,
+                seller_name: sellerName || null,
+                is_private_seller: $('[class*="private"]').length > 0 || /private/i.test($('body').text()),
                 dealer_id: null,
-                description: $('[class*="description"], [data-testid="description"]').first().text().trim() || null,
+                description: $('[class*="description"], [data-testid="description"], .vehicle-description').first().text().trim() || null,
                 images: [...new Set(images)],
                 vehicle_status: 'Used',
-                vin: getSpecValue('VIN'),
-                stock_number: getSpecValue('Stock') || getSpecValue('Stock Number'),
+                vin: getSpecValue(['VIN', 'Vehicle Identification Number']),
+                stock_number: getSpecValue(['Stock', 'Stock Number', 'Stock #']),
                 features: [],
                 url: url,
             };
@@ -264,7 +345,6 @@ async function main() {
             useSessionPool: true,
             maxConcurrency: 5,
             requestHandlerTimeoutSecs: 60,
-            additionalMimeTypes: ['application/json'],
             async requestHandler({ request, $, enqueueLinks, log: crawlerLog }) {
                 const label = request.userData?.label || 'LIST';
                 const pageNo = request.userData?.pageNo || 1;
@@ -297,27 +377,43 @@ async function main() {
                     if (saved >= RESULTS_WANTED) return;
 
                     try {
+                        let vehicle = null;
+
                         // Try ngVdpModel first
                         const vdpData = extractFromNgVdpModel($);
-                        let vehicle = vdpData ? parseVdpModel(vdpData, request.url) : null;
+                        if (vdpData) {
+                            vehicle = parseVdpModel(vdpData, request.url);
+                        }
 
                         // Try JSON-LD fallback
                         if (!vehicle || !vehicle.make) {
                             const jsonLd = extractFromJsonLd($);
                             if (jsonLd) {
+                                const existing = vehicle || {};
                                 vehicle = {
-                                    ...vehicle,
-                                    make: jsonLd.brand?.name || jsonLd.manufacturer || vehicle?.make,
-                                    model: jsonLd.model || vehicle?.model,
-                                    price: jsonLd.offers?.price || vehicle?.price,
-                                    description: jsonLd.description || vehicle?.description,
+                                    ...existing,
+                                    make: jsonLd.brand?.name || jsonLd.manufacturer || existing.make,
+                                    model: jsonLd.model || jsonLd.name?.split(' ').slice(1).join(' ') || existing.model,
+                                    price: jsonLd.offers?.price || existing.price,
+                                    price_formatted: jsonLd.offers?.priceCurrency ?
+                                        `$${jsonLd.offers.price?.toLocaleString()}` : existing.price_formatted,
+                                    description: jsonLd.description || existing.description,
+                                    images: jsonLd.image ? [jsonLd.image].flat() : existing.images,
                                 };
                             }
                         }
 
-                        // HTML fallback
-                        if (!vehicle || !vehicle.make) {
-                            vehicle = extractFromHtml($, request.url);
+                        // HTML fallback - always merge to fill gaps
+                        const htmlData = extractFromHtml($, request.url);
+                        if (!vehicle) {
+                            vehicle = htmlData;
+                        } else {
+                            // Fill in missing fields from HTML
+                            for (const [key, value] of Object.entries(htmlData)) {
+                                if (vehicle[key] === null || vehicle[key] === undefined || vehicle[key] === '') {
+                                    vehicle[key] = value;
+                                }
+                            }
                         }
 
                         if (vehicle && (vehicle.make || vehicle.model || vehicle.price)) {

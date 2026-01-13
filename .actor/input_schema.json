@@ -21,15 +21,13 @@
       "title": "Model",
       "type": "string",
       "description": "Vehicle model (e.g., Civic, Camry, F-150).",
-      "editor": "textfield",
-      "prefill": "civic"
+      "editor": "textfield"
     },
     "province": {
       "title": "Province",
       "type": "string",
       "description": "Canadian province code (e.g., on, bc, ab, qc).",
-      "editor": "textfield",
-      "prefill": "on"
+      "editor": "textfield"
     },
     "city": {
       "title": "City",
@@ -75,24 +73,6 @@
       "type": "integer",
       "description": "Maximum odometer reading in kilometers.",
       "editor": "number"
-    },
-    "bodyType": {
-      "title": "Body Type",
-      "type": "string",
-      "description": "Vehicle body style (e.g., sedan, suv, truck, coupe).",
-      "editor": "textfield"
-    },
-    "fuelType": {
-      "title": "Fuel Type",
-      "type": "string",
-      "description": "Fuel type (e.g., gasoline, electric, hybrid, diesel).",
-      "editor": "textfield"
-    },
-    "transmission": {
-      "title": "Transmission",
-      "type": "string",
-      "description": "Transmission type (e.g., automatic, manual).",
-      "editor": "textfield"
     },
     "results_wanted": {
       "title": "Maximum Results",
