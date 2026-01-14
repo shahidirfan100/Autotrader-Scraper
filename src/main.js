@@ -28,7 +28,7 @@ async function main() {
 
         const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : 20;
         const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.max(1, +MAX_PAGES_RAW) : 20;
-        const PAGE_SIZE = 15;
+        const PAGE_SIZE = 100; // Increased page size for fewer requests
         const BATCH_SIZE = 10;
 
         const toAbs = (href, base = 'https://www.autotrader.ca') => {
@@ -96,8 +96,8 @@ async function main() {
         const seenUrls = new Set();
         let baseListUrl = null;
         const dataBatch = [];
+        let totalListingsFound = 0;
 
-        // Batch push data for efficiency
         async function flushBatch() {
             if (dataBatch.length > 0) {
                 await Dataset.pushData(dataBatch);
@@ -105,7 +105,6 @@ async function main() {
             }
         }
 
-        // Extract data from page scripts - optimized
         function extractPageData($) {
             let result = null;
             $('script').each((_, el) => {
@@ -119,7 +118,6 @@ async function main() {
             return result;
         }
 
-        // Deep search for a value - optimized with early return
         function deepFind(obj, keys, maxDepth = 4) {
             if (!obj || maxDepth <= 0) return null;
             const keyList = Array.isArray(keys) ? keys : [keys];
@@ -139,13 +137,11 @@ async function main() {
             return null;
         }
 
-        // Parse vehicle data - optimized
         function parseVehicleJson(pageData, url) {
             if (!pageData) return null;
             const data = pageData.data || pageData;
             const urlAdId = url.match(/\/(\d+_[^\/\?]+)/)?.[1];
 
-            // Handle description
             let description = null;
             const descData = deepFind(data, ['description', 'additionalInfo']);
             if (descData) {
@@ -159,7 +155,6 @@ async function main() {
                 }
             }
 
-            // Extract images
             let images = [];
             const mediaData = deepFind(data, ['images', 'media', 'gallery']);
             if (mediaData) {
@@ -204,7 +199,6 @@ async function main() {
             };
         }
 
-        // HTML fallback - optimized with fewer selectors
         function extractFromHtml($, url) {
             const title = $('h1').first().text().trim();
             const titleMatch = title.match(/^(\d{4})\s+(\w+)\s+(.+)/);
@@ -265,20 +259,26 @@ async function main() {
             };
         }
 
-        // Find listing links - optimized
-        function findListingLinks($, base) {
-            const links = new Set();
+        // Find ALL listing links on page (including duplicates for count)
+        function findAllListingLinks($, base) {
+            const allLinks = [];
+            const uniqueLinks = [];
+
             $('a[href*="/a/"]').each((_, a) => {
                 const href = $(a).attr('href');
                 if (href && /\/a\/[a-zA-Z0-9%\-]+\/[a-zA-Z0-9%\-]+/.test(href)) {
                     const abs = toAbs(href, base);
-                    if (abs && !seenUrls.has(abs)) {
-                        links.add(abs);
-                        seenUrls.add(abs);
+                    if (abs) {
+                        allLinks.push(abs);
+                        if (!seenUrls.has(abs)) {
+                            uniqueLinks.push(abs);
+                            seenUrls.add(abs);
+                        }
                     }
                 }
             });
-            return [...links];
+
+            return { allLinks, uniqueLinks, totalOnPage: allLinks.length };
         }
 
         const crawler = new CheerioCrawler({
@@ -288,16 +288,12 @@ async function main() {
             persistCookiesPerSession: true,
             sessionPoolOptions: {
                 maxPoolSize: 50,
-                sessionOptions: {
-                    maxUsageCount: 20,
-                },
+                sessionOptions: { maxUsageCount: 20 },
             },
-            // Speed optimizations
             maxConcurrency: 10,
             minConcurrency: 3,
-            requestHandlerTimeoutSecs: 30,
-            navigationTimeoutSecs: 30,
-            // Stealth settings
+            requestHandlerTimeoutSecs: 45,
+            navigationTimeoutSecs: 45,
             additionalMimeTypes: ['application/json'],
             suggestResponseEncoding: 'utf-8',
             async requestHandler({ request, $, enqueueLinks }) {
@@ -312,18 +308,27 @@ async function main() {
                         baseListUrl = u.href;
                     }
 
-                    const links = findListingLinks($, request.url);
-                    log.info(`Page ${pageNo}: ${links.length} listings`, { url: request.url });
+                    const { uniqueLinks, totalOnPage } = findAllListingLinks($, request.url);
+                    totalListingsFound += uniqueLinks.length;
 
-                    if (links.length && saved < RESULTS_WANTED) {
+                    log.info(`Page ${pageNo}: ${uniqueLinks.length} new listings (${totalOnPage} total on page)`, { url: request.url });
+
+                    // Enqueue detail pages
+                    if (uniqueLinks.length && saved < RESULTS_WANTED) {
                         const remaining = RESULTS_WANTED - saved;
-                        const toEnqueue = links.slice(0, Math.max(0, remaining));
+                        const toEnqueue = uniqueLinks.slice(0, Math.max(0, remaining));
                         if (toEnqueue.length) {
                             await enqueueLinks({ urls: toEnqueue, userData: { label: 'DETAIL' } });
                         }
                     }
 
-                    if (saved + links.length < RESULTS_WANTED && pageNo < MAX_PAGES && links.length > 0) {
+                    // FIXED PAGINATION: Continue if page had ANY listings (even if all were duplicates)
+                    // and we still need more results
+                    const needMoreResults = saved + totalListingsFound < RESULTS_WANTED;
+                    const hasMorePages = pageNo < MAX_PAGES;
+                    const pageHadContent = totalOnPage > 0;
+
+                    if (needMoreResults && hasMorePages && pageHadContent) {
                         const nextOffset = pageNo * PAGE_SIZE;
                         const nextUrl = buildPaginationUrl(baseListUrl || request.url, nextOffset);
                         await enqueueLinks({ urls: [nextUrl], userData: { label: 'LIST', pageNo: pageNo + 1 } });
