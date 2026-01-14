@@ -79,7 +79,7 @@
       "type": "integer",
       "description": "Maximum number of vehicle listings to collect.",
       "minimum": 1,
-      "default": 50,
+      "default": 20,
       "prefill": 20,
       "editor": "number"
     },

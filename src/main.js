@@ -1,4 +1,4 @@
-// Autotrader.ca Home Delivery Scraper - CheerioCrawler implementation
+// Autotrader.ca Home Delivery Scraper - Optimized for speed and stealth
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
 
@@ -18,7 +18,7 @@ async function main() {
             maxPrice,
             minMileage,
             maxMileage,
-            results_wanted: RESULTS_WANTED_RAW = 50,
+            results_wanted: RESULTS_WANTED_RAW = 20,
             max_pages: MAX_PAGES_RAW = 20,
             startUrl,
             startUrls,
@@ -26,18 +26,13 @@ async function main() {
             proxyConfiguration,
         } = input;
 
-        const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : 50;
+        const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : 20;
         const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.max(1, +MAX_PAGES_RAW) : 20;
         const PAGE_SIZE = 15;
+        const BATCH_SIZE = 10;
 
         const toAbs = (href, base = 'https://www.autotrader.ca') => {
             try { return new URL(href, base).href; } catch { return null; }
-        };
-
-        const cleanText = (text) => {
-            if (!text) return null;
-            const cleaned = String(text).replace(/\s+/g, ' ').trim();
-            return cleaned || null;
         };
 
         const cleanPrice = (priceStr) => {
@@ -52,45 +47,46 @@ async function main() {
             return match ? parseInt(match[0].replace(/,/g, ''), 10) : null;
         };
 
-        const buildStartUrl = (pageOffset = 0) => {
-            const pathParts = ['https://www.autotrader.ca/cars'];
-
-            if (make) pathParts.push(encodeURIComponent(make.toLowerCase()));
-            if (model) pathParts.push(encodeURIComponent(model.toLowerCase()));
-            if (province) pathParts.push(encodeURIComponent(province.toLowerCase()));
-            if (city) pathParts.push(encodeURIComponent(city.toLowerCase()));
-
-            const u = new URL(pathParts.join('/') + '/');
-
-            // Home delivery filter
-            u.searchParams.set('hprc', 'True');
-            u.searchParams.set('wcp', 'True');
-
-            // Pagination
+        const buildPaginationUrl = (baseUrl, pageOffset) => {
+            const u = new URL(baseUrl);
             u.searchParams.set('rcp', String(PAGE_SIZE));
             u.searchParams.set('rcs', String(pageOffset));
+            return u.href;
+        };
 
-            // Year range
+        const buildStartUrl = () => {
+            let baseUrl = 'https://www.autotrader.ca/home-delivery/';
+
+            if (make || model || province || city) {
+                const pathParts = ['https://www.autotrader.ca/cars'];
+                if (make) pathParts.push(encodeURIComponent(make.toLowerCase()));
+                if (model) pathParts.push(encodeURIComponent(model.toLowerCase()));
+                if (province) pathParts.push(encodeURIComponent(province.toLowerCase()));
+                if (city) pathParts.push(encodeURIComponent(city.toLowerCase()));
+                baseUrl = pathParts.join('/') + '/';
+            }
+
+            const u = new URL(baseUrl);
+            u.searchParams.set('hprc', 'True');
+            u.searchParams.set('wcp', 'True');
+            u.searchParams.set('rcp', String(PAGE_SIZE));
+            u.searchParams.set('rcs', '0');
+
             if (minYear) u.searchParams.set('yRng', `${minYear},${maxYear || ''}`);
             else if (maxYear) u.searchParams.set('yRng', `,${maxYear}`);
-
-            // Price range
             if (minPrice) u.searchParams.set('prx', String(minPrice));
             if (maxPrice) u.searchParams.set('prxmax', String(maxPrice));
-
-            // Mileage range
             if (minMileage) u.searchParams.set('oRng', `${minMileage},${maxMileage || ''}`);
             else if (maxMileage) u.searchParams.set('oRng', `,${maxMileage}`);
 
             return u.href;
         };
 
-        // Initial URLs
         const initial = [];
         if (Array.isArray(startUrls) && startUrls.length) initial.push(...startUrls);
         if (startUrl) initial.push(startUrl);
         if (url) initial.push(url);
-        if (!initial.length) initial.push(buildStartUrl(0));
+        if (!initial.length) initial.push(buildStartUrl());
 
         const proxyConf = proxyConfiguration
             ? await Actor.createProxyConfiguration({ ...proxyConfiguration })
@@ -98,237 +94,183 @@ async function main() {
 
         let saved = 0;
         const seenUrls = new Set();
+        let baseListUrl = null;
+        const dataBatch = [];
 
-        // Extract data from ngVdpModel JSON (detail pages)
-        function extractFromNgVdpModel($) {
-            const scripts = $('script');
-            for (let i = 0; i < scripts.length; i++) {
-                const content = $(scripts[i]).html() || '';
-                // Try multiple patterns for the model data
-                const patterns = [
-                    /window\['ngVdpModel'\]\s*=\s*({[\s\S]*?});/,
-                    /window\.ngVdpModel\s*=\s*({[\s\S]*?});/,
-                    /__NEXT_DATA__.*?({[\s\S]*?})<\/script>/,
-                ];
-                for (const pattern of patterns) {
-                    const match = content.match(pattern);
-                    if (match) {
-                        try {
-                            return JSON.parse(match[1]);
-                        } catch { /* continue */ }
+        // Batch push data for efficiency
+        async function flushBatch() {
+            if (dataBatch.length > 0) {
+                await Dataset.pushData(dataBatch);
+                dataBatch.length = 0;
+            }
+        }
+
+        // Extract data from page scripts - optimized
+        function extractPageData($) {
+            let result = null;
+            $('script').each((_, el) => {
+                if (result) return false;
+                const content = $(el).html() || '';
+                const vdpMatch = content.match(/window\['ngVdpModel'\]\s*=\s*({[\s\S]*?});/);
+                if (vdpMatch) {
+                    try { result = { type: 'vdp', data: JSON.parse(vdpMatch[1]) }; return false; } catch { }
+                }
+            });
+            return result;
+        }
+
+        // Deep search for a value - optimized with early return
+        function deepFind(obj, keys, maxDepth = 4) {
+            if (!obj || maxDepth <= 0) return null;
+            const keyList = Array.isArray(keys) ? keys : [keys];
+
+            for (const key of keyList) {
+                if (obj[key] !== undefined && obj[key] !== null && obj[key] !== '') return obj[key];
+            }
+
+            if (typeof obj === 'object') {
+                for (const val of Object.values(obj)) {
+                    if (val && typeof val === 'object') {
+                        const found = deepFind(val, keys, maxDepth - 1);
+                        if (found !== null) return found;
                     }
                 }
             }
             return null;
         }
 
-        // Extract from JSON-LD schema  
-        function extractFromJsonLd($) {
-            const scripts = $('script[type="application/ld+json"]');
-            for (let i = 0; i < scripts.length; i++) {
-                try {
-                    const parsed = JSON.parse($(scripts[i]).html() || '');
-                    const items = Array.isArray(parsed) ? parsed : [parsed];
-                    for (const item of items) {
-                        if (item && (item['@type'] === 'Vehicle' || item['@type'] === 'Car' || item['@type'] === 'Product' || item['@type'] === 'Offer')) {
-                            return item;
-                        }
-                    }
-                } catch { /* ignore */ }
+        // Parse vehicle data - optimized
+        function parseVehicleJson(pageData, url) {
+            if (!pageData) return null;
+            const data = pageData.data || pageData;
+            const urlAdId = url.match(/\/(\d+_[^\/\?]+)/)?.[1];
+
+            // Handle description
+            let description = null;
+            const descData = deepFind(data, ['description', 'additionalInfo']);
+            if (descData) {
+                if (Array.isArray(descData)) {
+                    description = descData.map(d => typeof d === 'object' ? d.description : d).filter(Boolean).join('\n');
+                } else if (typeof descData === 'object' && descData.description) {
+                    const inner = descData.description;
+                    description = Array.isArray(inner) ? inner.map(d => typeof d === 'object' ? d.description : d).filter(Boolean).join('\n') : inner;
+                } else {
+                    description = String(descData);
+                }
             }
-            return null;
-        }
 
-        // Parse vehicle data from ngVdpModel - improved mapping
-        function parseVdpModel(data, url) {
-            if (!data) return null;
+            // Extract images
+            let images = [];
+            const mediaData = deepFind(data, ['images', 'media', 'gallery']);
+            if (mediaData) {
+                const imgList = Array.isArray(mediaData) ? mediaData : (mediaData.images || mediaData.gallery || []);
+                images = imgList.slice(0, 10).map(img => (typeof img === 'string' ? img : (img.url || img.src || '')).split('?')[0]).filter(Boolean);
+            }
 
-            // Navigate through potential nested structures
-            const hero = data.hero || data.vehicle || data.listing || data || {};
-            const specs = data.specifications || data.specs || hero.specifications || hero.specs || {};
-            const seller = data.seller || data.dealer || hero.seller || hero.dealer || {};
-            const pricing = data.pricing || data.price || hero.pricing || hero.price || {};
-            const media = data.media || data.images || data.gallery || hero.media || {};
-            const vehicle = data.vehicle || hero.vehicle || hero || {};
-
-            // Extract ad ID from URL if not in data
-            const urlAdId = url.match(/\/a\/[^\/]+\/[^\/]+\/[^\/]+\/[^\/]+\/(\d+_[^\/]+)/)?.[1] ||
-                url.match(/\/(\d+_[^\/\?]+)/)?.[1];
+            const seller = deepFind(data, ['seller', 'dealer']) || {};
+            const location = deepFind(data, ['location', 'address']) || {};
 
             return {
-                ad_id: data.adId || hero.adId || vehicle.adId || urlAdId || null,
-                make: vehicle.make || hero.make || specs.make || null,
-                model: vehicle.model || hero.model || specs.model || null,
-                year: vehicle.year || hero.year || specs.year || null,
-                trim: vehicle.trim || hero.trim || specs.trim || null,
-                price: pricing.price || pricing.amount || hero.price || cleanPrice(pricing.displayPrice) || null,
-                price_formatted: pricing.displayPrice || pricing.formattedPrice || hero.displayPrice ||
-                    (pricing.price ? `$${pricing.price.toLocaleString()}` : null),
-                mileage: specs.mileage || specs.odometer || specs.kilometres || vehicle.mileage || null,
-                mileage_formatted: specs.displayMileage || specs.formattedMileage ||
-                    (specs.mileage ? `${specs.mileage.toLocaleString()} km` : null),
-                transmission: specs.transmission || vehicle.transmission || null,
-                drivetrain: specs.drivetrain || specs.driveTrain || specs.driveType || vehicle.drivetrain || null,
-                body_type: specs.bodyType || specs.bodyStyle || specs.body || vehicle.bodyType || null,
-                exterior_color: specs.exteriorColour || specs.exteriorColor || specs.colour || vehicle.exteriorColour || null,
-                interior_color: specs.interiorColour || specs.interiorColor || vehicle.interiorColour || null,
-                fuel_type: specs.fuelType || specs.fuel || vehicle.fuelType || null,
-                engine: specs.engine || specs.engineDescription || vehicle.engine || null,
-                doors: specs.doors || specs.numberOfDoors || vehicle.doors || null,
-                seats: specs.seatingCapacity || specs.seats || specs.passengers || vehicle.seats || null,
-                city: seller.city || seller.location?.city || vehicle.city || null,
-                province: seller.province || seller.state || seller.location?.province || vehicle.province || null,
-                seller_name: seller.name || seller.dealerName || seller.sellerName || null,
-                is_private_seller: seller.isPrivate || seller.privateSeller || seller.isPrivateSeller || false,
-                dealer_id: seller.dealerId || seller.id || null,
-                description: data.description || hero.description || vehicle.description || null,
-                images: extractImages(media),
-                vehicle_status: hero.status || specs.status || vehicle.status || 'Used',
-                vin: specs.vin || vehicle.vin || null,
-                stock_number: specs.stockNumber || specs.stock || vehicle.stockNumber || null,
-                features: data.features || hero.features || vehicle.features || [],
-                url: url,
+                ad_id: deepFind(data, ['adId', 'id', 'listingId']) || urlAdId,
+                make: deepFind(data, ['make', 'manufacturer', 'brand']),
+                model: deepFind(data, ['model', 'modelName']),
+                year: deepFind(data, ['year', 'modelYear']),
+                trim: deepFind(data, ['trim', 'trimLevel']),
+                price: deepFind(data, ['price', 'askingPrice']),
+                price_formatted: deepFind(data, ['displayPrice', 'formattedPrice']),
+                mileage: deepFind(data, ['mileage', 'odometer', 'kilometres']),
+                mileage_formatted: deepFind(data, ['displayMileage', 'formattedMileage']),
+                transmission: deepFind(data, ['transmission']),
+                drivetrain: deepFind(data, ['drivetrain', 'driveTrain']),
+                body_type: deepFind(data, ['bodyType', 'bodyStyle', 'body']),
+                exterior_color: deepFind(data, ['exteriorColour', 'exteriorColor', 'colour']),
+                interior_color: deepFind(data, ['interiorColour', 'interiorColor']),
+                fuel_type: deepFind(data, ['fuelType', 'fuel']),
+                engine: deepFind(data, ['engine', 'engineDescription']),
+                doors: deepFind(data, ['doors', 'numberOfDoors']),
+                seats: deepFind(data, ['seatingCapacity', 'seats']),
+                city: seller.city || location.city || deepFind(data, ['city', 'dealerCity']),
+                province: seller.province || seller.state || location.province || deepFind(data, ['province', 'state']),
+                seller_name: seller.name || seller.dealerName || deepFind(data, ['dealerName', 'sellerName']),
+                is_private_seller: deepFind(data, ['isPrivate', 'privateSeller']) || false,
+                dealer_id: seller.dealerId || seller.id || deepFind(data, ['dealerId']),
+                description,
+                images,
+                vehicle_status: deepFind(data, ['status', 'condition']) || 'Used',
+                vin: deepFind(data, ['vin']),
+                stock_number: deepFind(data, ['stockNumber', 'stock']),
+                features: deepFind(data, ['features', 'options']) || [],
+                url,
             };
         }
 
-        function extractImages(media) {
-            if (!media) return [];
-            const images = media.images || media.gallery || media.photos || [];
-            if (Array.isArray(images)) {
-                return images.map(img => {
-                    if (typeof img === 'string') return img.split('?')[0];
-                    return (img.url || img.src || img.href || '').split('?')[0];
-                }).filter(Boolean);
-            }
-            return [];
-        }
-
-        // HTML fallback extraction - improved with better selectors
+        // HTML fallback - optimized with fewer selectors
         function extractFromHtml($, url) {
-            // Parse title for year/make/model
             const title = $('h1').first().text().trim();
             const titleMatch = title.match(/^(\d{4})\s+(\w+)\s+(.+)/);
 
-            // Price extraction with multiple selectors
-            const priceSelectors = [
-                '[data-testid="hero-price"]',
-                '.hero-price',
-                '[class*="price-amount"]',
-                '[class*="listing-price"]',
-                '.price-container',
-                '[class*="Price"]',
-                'span[class*="price"]',
-            ];
-            let priceText = null;
-            for (const sel of priceSelectors) {
-                const el = $(sel).first();
-                if (el.length) {
-                    priceText = el.text().trim();
-                    if (priceText && priceText.includes('$')) break;
-                }
-            }
+            const priceEl = $('[class*="price"]').first();
+            const priceText = priceEl.text().trim();
 
-            // Mileage extraction
-            const mileageSelectors = [
-                '[data-testid="mileage"]',
-                '[class*="mileage"]',
-                '[class*="odometer"]',
-                '[class*="kilometres"]',
-            ];
-            let mileageText = null;
-            for (const sel of mileageSelectors) {
-                const el = $(sel).first();
-                if (el.length) {
-                    mileageText = el.text().trim();
-                    if (mileageText && /\d/.test(mileageText)) break;
-                }
-            }
+            const mileageEl = $('[class*="mileage"], [class*="odometer"]').first();
+            const mileageText = mileageEl.text().trim();
 
-            // Image extraction
             const images = [];
-            $('img[src*="images.autotrader.ca"], [class*="gallery"] img, [class*="carousel"] img, [class*="photo"] img').each((_, img) => {
+            $('img[src*="images.autotrader.ca"]').slice(0, 10).each((_, img) => {
                 const src = $(img).attr('src') || $(img).attr('data-src');
-                if (src && !src.includes('placeholder') && !src.includes('logo')) {
-                    images.push(src.split('?')[0]);
-                }
+                if (src) images.push(src.split('?')[0]);
             });
 
-            // Spec value extractor
-            const getSpecValue = (labels) => {
-                const labelList = Array.isArray(labels) ? labels : [labels];
-                for (const label of labelList) {
-                    // Try definition list
-                    let row = $(`dt:contains("${label}")`).first();
-                    if (row.length) {
-                        const val = row.next('dd').text().trim();
-                        if (val) return val;
-                    }
-                    // Try table
-                    row = $(`th:contains("${label}"), td:contains("${label}")`).first();
-                    if (row.length) {
-                        const val = row.next('td').text().trim() || row.parent().find('td').last().text().trim();
-                        if (val) return val;
-                    }
-                    // Try label/value pairs
-                    row = $(`[class*="label"]:contains("${label}"), [class*="spec-label"]:contains("${label}")`).first();
-                    if (row.length) {
-                        const val = row.next().text().trim() || row.parent().find('[class*="value"]').text().trim();
-                        if (val) return val;
-                    }
-                }
-                return null;
+            const getSpec = (label) => {
+                const el = $(`dt:contains("${label}")`).first();
+                return el.length ? el.next('dd').text().trim() : null;
             };
 
-            // Location extraction
-            const locationText = $('[class*="location"], [data-testid="location"], [class*="dealer-location"]').first().text().trim();
-            const locationParts = locationText.split(',').map(s => s.trim());
+            const locationText = $('[class*="location"]').first().text().trim();
+            const provMatch = locationText.match(/\b(ON|BC|AB|QC|MB|SK|NS|NB|NL|PE|NT|YT|NU)\b/i);
 
-            // Seller extraction
-            const sellerName = $('[class*="dealer-name"], [class*="seller-name"], [data-testid="dealer-name"], [class*="dealership"]').first().text().trim();
-
-            // Extract ad ID from URL
-            const urlAdId = url.match(/\/(\d+_[^\/\?]+)/)?.[1] || url.match(/\/a\/[^\/]+\/[^\/]+\/[^\/]+\/[^\/]+\/([^\/\?]+)/)?.[1];
+            const urlAdId = url.match(/\/(\d+_[^\/\?]+)/)?.[1];
 
             return {
-                ad_id: urlAdId || null,
-                make: titleMatch?.[2] || null,
-                model: titleMatch?.[3]?.split(' ')[0] || null,
+                ad_id: urlAdId,
+                make: titleMatch?.[2],
+                model: titleMatch?.[3]?.split(' ')[0],
                 year: titleMatch?.[1] ? parseInt(titleMatch[1], 10) : null,
                 trim: titleMatch?.[3]?.split(' ').slice(1).join(' ') || null,
                 price: cleanPrice(priceText),
                 price_formatted: priceText || null,
                 mileage: cleanMileage(mileageText),
                 mileage_formatted: mileageText || null,
-                transmission: getSpecValue(['Transmission', 'Trans']),
-                drivetrain: getSpecValue(['Drivetrain', 'Drive Train', 'Drive Type']),
-                body_type: getSpecValue(['Body Type', 'Body Style', 'Body']),
-                exterior_color: getSpecValue(['Exterior Colour', 'Exterior Color', 'Colour', 'Color']),
-                interior_color: getSpecValue(['Interior Colour', 'Interior Color']),
-                fuel_type: getSpecValue(['Fuel Type', 'Fuel']),
-                engine: getSpecValue(['Engine', 'Engine Type']),
-                doors: (() => { const d = getSpecValue(['Doors', 'Number of Doors']); return d ? parseInt(d, 10) : null; })(),
-                seats: getSpecValue(['Seats', 'Seating Capacity', 'Passengers']),
-                city: locationParts[0] || null,
-                province: locationParts[1] || null,
-                seller_name: sellerName || null,
-                is_private_seller: $('[class*="private"]').length > 0 || /private/i.test($('body').text()),
+                transmission: getSpec('Transmission'),
+                drivetrain: getSpec('Drivetrain'),
+                body_type: getSpec('Body Type') || getSpec('Body Style'),
+                exterior_color: getSpec('Exterior Colour'),
+                interior_color: getSpec('Interior Colour'),
+                fuel_type: getSpec('Fuel Type'),
+                engine: getSpec('Engine'),
+                doors: (() => { const d = getSpec('Doors'); return d ? parseInt(d, 10) : null; })(),
+                seats: getSpec('Seats'),
+                city: provMatch ? locationText.replace(provMatch[0], '').replace(/,/g, '').trim() : null,
+                province: provMatch?.[1] || null,
+                seller_name: $('[class*="dealer-name"]').first().text().trim() || null,
+                is_private_seller: /private/i.test($('body').text()),
                 dealer_id: null,
-                description: $('[class*="description"], [data-testid="description"], .vehicle-description').first().text().trim() || null,
+                description: $('[class*="description"]').first().text().trim() || null,
                 images: [...new Set(images)],
-                vehicle_status: 'Used',
-                vin: getSpecValue(['VIN', 'Vehicle Identification Number']),
-                stock_number: getSpecValue(['Stock', 'Stock Number', 'Stock #']),
+                vehicle_status: /\bnew\b/i.test(title) ? 'New' : 'Used',
+                vin: getSpec('VIN'),
+                stock_number: getSpec('Stock'),
                 features: [],
-                url: url,
+                url,
             };
         }
 
-        // Find vehicle listing links
+        // Find listing links - optimized
         function findListingLinks($, base) {
             const links = new Set();
             $('a[href*="/a/"]').each((_, a) => {
                 const href = $(a).attr('href');
-                if (href && /\/a\/[a-zA-Z0-9\-]+/.test(href)) {
+                if (href && /\/a\/[a-zA-Z0-9%\-]+\/[a-zA-Z0-9%\-]+/.test(href)) {
                     const abs = toAbs(href, base);
                     if (abs && !seenUrls.has(abs)) {
                         links.add(abs);
@@ -341,19 +283,39 @@ async function main() {
 
         const crawler = new CheerioCrawler({
             proxyConfiguration: proxyConf,
-            maxRequestRetries: 3,
+            maxRequestRetries: 2,
             useSessionPool: true,
-            maxConcurrency: 5,
-            requestHandlerTimeoutSecs: 60,
-            async requestHandler({ request, $, enqueueLinks, log: crawlerLog }) {
+            persistCookiesPerSession: true,
+            sessionPoolOptions: {
+                maxPoolSize: 50,
+                sessionOptions: {
+                    maxUsageCount: 20,
+                },
+            },
+            // Speed optimizations
+            maxConcurrency: 10,
+            minConcurrency: 3,
+            requestHandlerTimeoutSecs: 30,
+            navigationTimeoutSecs: 30,
+            // Stealth settings
+            additionalMimeTypes: ['application/json'],
+            suggestResponseEncoding: 'utf-8',
+            async requestHandler({ request, $, enqueueLinks }) {
                 const label = request.userData?.label || 'LIST';
                 const pageNo = request.userData?.pageNo || 1;
 
                 if (label === 'LIST') {
-                    const links = findListingLinks($, request.url);
-                    crawlerLog.info(`Page ${pageNo}: Found ${links.length} vehicle listings`, { url: request.url });
+                    if (pageNo === 1) {
+                        const u = new URL(request.url);
+                        u.searchParams.delete('rcs');
+                        u.searchParams.delete('rcp');
+                        baseListUrl = u.href;
+                    }
 
-                    if (links.length) {
+                    const links = findListingLinks($, request.url);
+                    log.info(`Page ${pageNo}: ${links.length} listings`, { url: request.url });
+
+                    if (links.length && saved < RESULTS_WANTED) {
                         const remaining = RESULTS_WANTED - saved;
                         const toEnqueue = links.slice(0, Math.max(0, remaining));
                         if (toEnqueue.length) {
@@ -361,95 +323,68 @@ async function main() {
                         }
                     }
 
-                    // Pagination
-                    if (saved < RESULTS_WANTED && pageNo < MAX_PAGES && links.length > 0) {
+                    if (saved + links.length < RESULTS_WANTED && pageNo < MAX_PAGES && links.length > 0) {
                         const nextOffset = pageNo * PAGE_SIZE;
-                        const nextUrl = buildStartUrl(nextOffset);
-                        await enqueueLinks({
-                            urls: [nextUrl],
-                            userData: { label: 'LIST', pageNo: pageNo + 1 }
-                        });
+                        const nextUrl = buildPaginationUrl(baseListUrl || request.url, nextOffset);
+                        await enqueueLinks({ urls: [nextUrl], userData: { label: 'LIST', pageNo: pageNo + 1 } });
                     }
                     return;
                 }
 
-                if (label === 'DETAIL') {
-                    if (saved >= RESULTS_WANTED) return;
-
+                if (label === 'DETAIL' && saved < RESULTS_WANTED) {
                     try {
                         let vehicle = null;
+                        const pageData = extractPageData($);
+                        if (pageData) vehicle = parseVehicleJson(pageData, request.url);
 
-                        // Try ngVdpModel first
-                        const vdpData = extractFromNgVdpModel($);
-                        if (vdpData) {
-                            vehicle = parseVdpModel(vdpData, request.url);
-                        }
-
-                        // Try JSON-LD fallback
-                        if (!vehicle || !vehicle.make) {
-                            const jsonLd = extractFromJsonLd($);
-                            if (jsonLd) {
-                                const existing = vehicle || {};
-                                vehicle = {
-                                    ...existing,
-                                    make: jsonLd.brand?.name || jsonLd.manufacturer || existing.make,
-                                    model: jsonLd.model || jsonLd.name?.split(' ').slice(1).join(' ') || existing.model,
-                                    price: jsonLd.offers?.price || existing.price,
-                                    price_formatted: jsonLd.offers?.priceCurrency ?
-                                        `$${jsonLd.offers.price?.toLocaleString()}` : existing.price_formatted,
-                                    description: jsonLd.description || existing.description,
-                                    images: jsonLd.image ? [jsonLd.image].flat() : existing.images,
-                                };
-                            }
-                        }
-
-                        // HTML fallback - always merge to fill gaps
                         const htmlData = extractFromHtml($, request.url);
                         if (!vehicle) {
                             vehicle = htmlData;
                         } else {
-                            // Fill in missing fields from HTML
                             for (const [key, value] of Object.entries(htmlData)) {
-                                if (vehicle[key] === null || vehicle[key] === undefined || vehicle[key] === '') {
+                                if (vehicle[key] === null || vehicle[key] === undefined ||
+                                    (Array.isArray(vehicle[key]) && vehicle[key].length === 0)) {
                                     vehicle[key] = value;
                                 }
                             }
                         }
 
+                        if (vehicle.price && !vehicle.price_formatted) {
+                            vehicle.price_formatted = `$${Number(vehicle.price).toLocaleString()}`;
+                        }
+                        if (vehicle.mileage && !vehicle.mileage_formatted) {
+                            vehicle.mileage_formatted = `${Number(vehicle.mileage).toLocaleString()} km`;
+                        }
+
                         if (vehicle && (vehicle.make || vehicle.model || vehicle.price)) {
-                            await Dataset.pushData(vehicle);
+                            dataBatch.push(vehicle);
                             saved++;
 
-                            if (saved % 10 === 0) {
-                                crawlerLog.info(`Progress: ${saved}/${RESULTS_WANTED} vehicles scraped`);
+                            if (dataBatch.length >= BATCH_SIZE) {
+                                await flushBatch();
+                                log.info(`Progress: ${saved}/${RESULTS_WANTED} vehicles`);
                             }
                         }
                     } catch (err) {
-                        crawlerLog.warning(`Failed to extract: ${request.url}`, { error: err.message });
+                        log.debug(`Extract error: ${request.url}`, { error: err.message });
                     }
                 }
             },
-            failedRequestHandler({ request, log: crawlerLog }, error) {
-                crawlerLog.warning(`Request failed: ${request.url}`, { error: error.message });
+            failedRequestHandler({ request }, error) {
+                log.debug(`Failed: ${request.url}`, { error: error.message });
             },
         });
 
-        log.info(`Starting Autotrader.ca scraper`, {
-            make, model, province,
-            resultsWanted: RESULTS_WANTED,
-            maxPages: MAX_PAGES
-        });
+        log.info(`Starting scraper`, { make, model, province, resultsWanted: RESULTS_WANTED, maxPages: MAX_PAGES });
 
         await crawler.run(initial.map(u => ({ url: u, userData: { label: 'LIST', pageNo: 1 } })));
 
-        log.info(`Scraping complete. Total vehicles saved: ${saved}`);
+        await flushBatch();
+        log.info(`Complete. Saved: ${saved} vehicles`);
 
     } finally {
         await Actor.exit();
     }
 }
 
-main().catch(err => {
-    console.error('Actor failed:', err);
-    process.exit(1);
-});
+main().catch(err => { console.error('Actor failed:', err); process.exit(1); });
