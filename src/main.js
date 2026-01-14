@@ -28,7 +28,7 @@ async function main() {
 
         const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : 20;
         const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.max(1, +MAX_PAGES_RAW) : 20;
-        const PAGE_SIZE = 100; // Increased page size for fewer requests
+        const PAGE_SIZE = 15; // Autotrader only supports 15, 25, 50 - using 15 for reliability
         const BATCH_SIZE = 10;
 
         const toAbs = (href, base = 'https://www.autotrader.ca') => {
@@ -259,16 +259,20 @@ async function main() {
             };
         }
 
-        // Find ALL listing links on page (including duplicates for count)
+        // FIXED: Use correct selector pattern from browser inspection
+        // Autotrader uses 'a.inner-link' with duplicate links per listing - need to dedupe by href
         function findAllListingLinks($, base) {
             const allLinks = [];
             const uniqueLinks = [];
+            const seenHrefs = new Set();
 
-            $('a[href*="/a/"]').each((_, a) => {
+            // Primary selector: a.inner-link with /a/ in href (confirmed from browser)
+            $('a.inner-link[href*="/a/"], a[href*="/a/"]').each((_, a) => {
                 const href = $(a).attr('href');
                 if (href && /\/a\/[a-zA-Z0-9%\-]+\/[a-zA-Z0-9%\-]+/.test(href)) {
                     const abs = toAbs(href, base);
-                    if (abs) {
+                    if (abs && !seenHrefs.has(abs)) {
+                        seenHrefs.add(abs);
                         allLinks.push(abs);
                         if (!seenUrls.has(abs)) {
                             uniqueLinks.push(abs);
@@ -311,7 +315,7 @@ async function main() {
                     const { uniqueLinks, totalOnPage } = findAllListingLinks($, request.url);
                     totalListingsFound += uniqueLinks.length;
 
-                    log.info(`Page ${pageNo}: ${uniqueLinks.length} new listings (${totalOnPage} total on page)`, { url: request.url });
+                    log.info(`Page ${pageNo}: ${uniqueLinks.length} new, ${totalOnPage} total`, { url: request.url });
 
                     // Enqueue detail pages
                     if (uniqueLinks.length && saved < RESULTS_WANTED) {
@@ -322,9 +326,8 @@ async function main() {
                         }
                     }
 
-                    // FIXED PAGINATION: Continue if page had ANY listings (even if all were duplicates)
-                    // and we still need more results
-                    const needMoreResults = saved + totalListingsFound < RESULTS_WANTED;
+                    // Continue pagination if page had content and we need more
+                    const needMoreResults = totalListingsFound < RESULTS_WANTED;
                     const hasMorePages = pageNo < MAX_PAGES;
                     const pageHadContent = totalOnPage > 0;
 
